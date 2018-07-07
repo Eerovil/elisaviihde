@@ -15,84 +15,93 @@ import math
 class elisaviihde:
     # Init args
     verbose = False
-    baseurl = "https://elisaviihde.fi"
-    ssobaseurl = "https://id.elisa.fi"
-    session = None
+    baseurl = "https://api-viihde-gateway.dc1.elisa.fi"
+    external_client_id = 'external'
+    external_client_secret = None
+    external_api_key = None
     authcode = None
+    oauth_data = None
     userinfo = None
     inited = False
     verifycerts = False
 
     def __init__(self, verbose=False):
-        # Init session to store cookies
         self.verbose = verbose
-        self.session = requests.Session()
-        self.session.headers.update({"Referer": self.baseurl + "/"})
+    
+    def set_api_key(self, external_api_key, external_client_secret):
+        self.external_client_secret = external_client_secret
+        self.external_api_key = external_api_key
 
-        # Make initial request to get session cookie
+    @property
+    def oauth_token(self):
+        if self.oauth_data is None:
+            return None
+        return self.oauth_data['access_token']
+    
+    def get_authcode(self):
         if self.verbose:
-            print "Initing session..."
+            print "Getting authcode..."
 
-        init = self.session.get(self.baseurl + "/", verify=self.verifycerts)
-        self.checkrequest(init.status_code)
-
-    def login(self, username, password):
-        # Get sso auth token
-        if self.verbose:
-            print "Getting single-sign-on token..."
-        token = self.session.post(self.baseurl + "/api/sso/authcode",
-                                  data={"username": username},
-                                  headers={"Content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                                           "X-Requested-With": "XMLHttpRequest"},
-                                  verify=self.verifycerts)
-        self.checkrequest(token.status_code)
         try:
-            self.authcode = token.json()["code"]
+            payload = {
+                "client_id": self.external_client_id, "client_secret": self.external_client_secret,
+                "response_type": "code", "scopes": []
+            }
+            headers = {'content-type': 'application/json','apikey': self.external_api_key}
+            response = requests.post(
+                "{}/auth/authorize/access-code".format(self.baseurl),
+                json=payload, headers=headers
+            )
+            self.authcode = response.json()['code']
+            return self.authcode
         except ValueError as err:
             raise Exception("Could not fetch sso token", err)
 
-        # Login with token
+    def get_oauth_data_with_userpass(self, username, password):
         if self.verbose:
-            print "Logging in with single-sign-on token..."
-        login = self.session.post(self.ssobaseurl + "/sso/login",
-                                  data=json.dumps({"accountId": username,
-                                                   "password": password,
-                                                   "authCode": self.authcode,
-                                                   "suppressErrors": True}),
-                                  headers={"Content-type": "application/json; charset=UTF-8",
-                                           "Origin": self.baseurl},
-                                  verify=self.verifycerts)
-        self.checkrequest(login.status_code)
+            print "Getting oauth token with authcode and user+pass..."
 
-        # Login with username and password
-        if self.verbose:
-            print "Logging in with username and password..."
-        user = self.session.post(self.baseurl + "/api/user",
-                                 data={"username": username,
-                                       "password": password},
-                                 headers={"Content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-                                          "X-Requested-With": "XMLHttpRequest"},
-                                 verify=self.verifycerts)
-        self.checkrequest(user.status_code)
-        try:
-            self.userinfo = user.json()
-        except ValueError as err:
-            raise Exception("Could not fetch user information", err)
+        payload = {
+            'grant_type':'authorization_code', 'username': username, 'password': password,
+            "client_id": self.external_client_id, "code": self.authcode
+        }
+        headers = {
+            'content-type': 'application/x-www-form-urlencoded',
+            'apikey': self.external_api_key
+        }
+        response = requests.post(
+            "{}/auth/authorize/access-token".format(self.baseurl),
+            data=payload, headers=headers
+        )
+        self.oauth_data = response.json()
+
+    def get_oauth_data_with_refresh_token(self, refresh_token):
+        payload = {
+            'grant_type':'refresh_token',"client_id": self.external_client_id,
+            "client_secret": self.external_client_secret, "refresh_token": refresh_token
+        }
+        headers = {'Authorization': 'Bearer '+ refresh_token, 'apikey': self.external_api_key}
+        response = requests.post(
+            "{}/auth/authorize/access-token".format(self.baseurl),
+            data=payload, headers=headers
+        )
+        response.raise_for_status()
+        self.oauth_data = response.json()
+
+    def login(self, username, password):
+        self.get_authcode()
+
+        self.get_oauth_data_with_userpass(username, password)
+        self.inited = True
+
+    def login_with_refresh_token(self, refresh_token):
+        self.get_authcode()
+
+        self.get_oauth_data_with_refresh_token(refresh_token)
         self.inited = True
 
     def islogged(self):
-        if self.inited:
-            return True
-        try:
-            logincheck = self.session.get(self.baseurl + "/tallenteet/api/folders",
-                                          headers={
-                                              "X-Requested-With": "XMLHttpRequest"},
-                                          verify=self.verifycerts)
-            self.checkrequest(logincheck.status_code)
-            self.inited = True
-            return True
-        except Exception as err:
-            return False
+        return self.oauth_token is not None
 
     def checklogged(self):
         if not self.islogged():
@@ -104,6 +113,7 @@ class elisaviihde:
                 "API request failed with error code: " + str(statuscode))
 
     def close(self):
+        raise NotImplementedError()
         if self.verbose:
             print "Logging out and closing session..."
         logout = self.session.post(self.baseurl + "/api/user/logout",
@@ -113,6 +123,7 @@ class elisaviihde:
         self.session.close()
         self.userinfo = None
         self.authcode = None
+        self.oauth_data = None
         self.inited = False
         self.checkrequest(logout.status_code)
 
@@ -122,41 +133,32 @@ class elisaviihde:
     def getuser(self):
         return self.userinfo
 
-    def getsession(self):
-        return requests.utils.dict_from_cookiejar(self.session.cookies)
-
-    def setsession(self, cookies):
-        self.session.cookies = requests.utils.cookiejar_from_dict(cookies)
-
-    def walk(self, tree, parent=None):
-        # Walk folder tree recursively
-        flat = []
-        subtree = None
-        if "folders" in tree:
-            if len(tree["folders"]) > 0:
-                subtree = tree["folders"]
-            del tree["folders"]
-        if "id" in tree:
-            tree["parentFolder"] = parent if tree["id"] > 0 else None
-            flat.append(tree)
-        if subtree:
-            for folder in subtree:
-                flat += self.walk(folder, (tree["id"] if "id" in tree else 0))
-        return flat
+    def recordings_request(self, endpoint, headers={}):
+        headers.update({
+            'Authorization': 'Bearer ' + self.oauth_token,
+            'apikey': self.external_api_key
+        })
+        platform = 'external'
+        app_version = '1.0'
+        response = requests.get(
+            "{}{}?v=2.1&platform={}&appVersion={}".format(
+                self.baseurl, endpoint, platform, app_version
+            ),
+            headers=headers
+        )
+        response.raise_for_status()
+        return response
 
     def getfolders(self, folderid=0):
+        self.checklogged()
         # Get folders
         if self.verbose:
             print "Getting folders..."
-        self.checklogged()
-        folders = self.session.get(self.baseurl + "/tallenteet/api/folders",
-                                   headers={
-                                       "X-Requested-With": "XMLHttpRequest"},
-                                   verify=self.verifycerts)
-        self.checkrequest(folders.status_code)
-        return [folder for folder in self.walk(folders.json()) if folder["parentFolder"] == folderid]
+        response = self.recordings_request('/rest/npvr/folders')
+        return response.json()['folders']
 
     def getfolderstatus(self, folderid=0):
+        raise NotImplementedError()
         # Get folder info
         if self.verbose:
             print "Getting folder info..."
@@ -173,32 +175,11 @@ class elisaviihde:
         self.checklogged()
         if self.verbose:
             print "Getting recordings..."
-        recordings = []
-        if page == None:
-            folder = self.getfolderstatus(folderid)
-            # Append rest of pages to list (50 recordings per page)
-            maxpage = int(math.floor(folder["recordingsCount"] / 50))
-            if maxpage > 0:
-                pages = range(0, maxpage)
-            else:
-                pages = [0]
-        else:
-            pages = [page]
-        for pageno in pages:
-            recordingspp = self.session.get(self.baseurl + "/tallenteet/api/recordings/" + str(folderid)
-                                            + "?page=" + str(pageno)
-                                              + "&sortBy=" + str(sortby)
-                                              + "&sortOrder=" + str(sortorder)
-                                              + "&watchedStatus=" +
-                                            str(status),
-                                            headers={
-                                                "X-Requested-With": "XMLHttpRequest"},
-                                            verify=self.verifycerts)
-            self.checkrequest(recordingspp.status_code)
-            recordings += recordingspp.json()
-        return recordings
+        response = self.recordings_request('/rest/npvr/recordings/folder/{}'.format(folderid))
+        return response.json()['recordings']
 
     def getprogram(self, programid=0):
+        raise NotImplementedError()
         # Parse program information
         self.checklogged()
         if self.verbose:
@@ -237,14 +218,11 @@ class elisaviihde:
         self.checklogged()
         if self.verbose:
             print "Getting stream uri info..."
-        uridata = self.session.get(
-            self.baseurl + "/tallenteet/katso/" + str(programid), verify=self.verifycerts)
-        self.checkrequest(uridata.status_code)
-        for line in uridata.text.split("\n"):
-            if "recording-player" in line:
-                return re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', line)[0]
+        response = self.recordings_request("/rest/npvr/recordings/url/{}".format(programid))
+        return response.json()['url']
 
     def markwatched(self, programid=0):
+        raise NotImplementedError()
         # Mark recording as watched
         if self.verbose:
             print "Marking as watched..."
