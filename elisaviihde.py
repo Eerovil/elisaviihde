@@ -133,16 +133,17 @@ class elisaviihde:
     def getuser(self):
         return self.userinfo
 
-    def recordings_request(self, endpoint, headers={}):
+    def recordings_request(self, endpoint, headers={}, use_v21=True):
         headers.update({
             'Authorization': 'Bearer ' + self.oauth_token,
             'apikey': self.external_api_key
         })
+        v21 = 'v=2.1' if use_v21 else ''
         platform = 'external'
         app_version = '1.0'
         response = requests.get(
-            "{}{}?v=2.1&platform={}&appVersion={}".format(
-                self.baseurl, endpoint, platform, app_version
+            "{}{}?{}&platform={}&appVersion={}".format(
+                self.baseurl, endpoint, v21, platform, app_version
             ),
             headers=headers
         )
@@ -151,10 +152,22 @@ class elisaviihde:
 
     def getfolders(self, folderid=0):
         self.checklogged()
+        if folderid == 0:  # root
+            folderid = ''
+        else:
+            folderid = '/{}'.format(folderid)
         # Get folders
         if self.verbose:
             print "Getting folders..."
-        response = self.recordings_request('/rest/npvr/folders')
+        try:
+            response = self.recordings_request(
+                '/rest/npvr/folders{}'.format(folderid), use_v21=False
+            )
+        except requests.HTTPError:  # Maybe the non-2.1 api no longer works? Fallback to normal.
+            if folderid == '':
+                return []
+            response = self.recordings_request('/rest/npvr/folders'.format(folderid))
+
         return response.json()['folders']
 
     def getfolderstatus(self, folderid=0):
