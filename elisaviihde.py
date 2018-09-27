@@ -142,7 +142,7 @@ class elisaviihde:
         platform = 'external'
         app_version = '1.0'
         response = requests.get(
-            "{}{}?{}&platform={}&appVersion={}".format(
+            "{}{}?{}&platform={}&appVersion={}&page=0&pageSize=10000".format(
                 self.baseurl, endpoint, v21, platform, app_version
             ),
             headers=headers
